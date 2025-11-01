@@ -941,20 +941,6 @@
           <input on:input={()=>changeFilter()} bind:checked={filter.showAudioChannels} type="checkbox" class="toggle" />
         </label>
       </li>
-
-      <li>
-        <button on:click={openSaveSnapshotDialog} class="btn btn-sm btn-ghost gap-2">
-          <Icon src={Camera} size="20"></Icon>
-          <span>Save Snapshot</span>
-        </button>
-      </li>
-
-      <li>
-        <button on:click={openRecallDialog} class="btn btn-sm btn-ghost gap-2">
-          <Icon src={ArrowUturnLeft} size="20"></Icon>
-          <span>Recall Snapshot</span>
-        </button>
-      </li>
     </ul>
 
 
@@ -1093,6 +1079,17 @@
 
     </div>
 
+    <!-- Snapshot Controls Bottom Bar -->
+    <div class="snapshot-controls" style="position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; background-color: hsl(var(--b2)); padding: 1rem; display: flex; justify-content: center; gap: 1rem; box-shadow: 0 -2px 10px rgba(0,0,0,0.1);">
+      <button on:click={openSaveSnapshotDialog} class="btn btn-primary gap-2">
+        <Icon src={Camera} size="20"></Icon>
+        <span>Save Snapshot</span>
+      </button>
+      <button on:click={openRecallDialog} class="btn btn-primary gap-2">
+        <Icon src={ArrowUturnLeft} size="20"></Icon>
+        <span>Recall Snapshot</span>
+      </button>
+    </div>
 
     <dialog bind:this={labelModal} class="modal">
       <div class="modal-box">
