@@ -44,7 +44,8 @@ class _SnapshotService {
 
   getSnapshot(id: string): Snapshot | null {
     const snapshots = this.getAllSnapshots();
-    return snapshots.find(s => s.id === id) || null;
+    const filtered = snapshots.filter(s => s.id === id);
+    return filtered.length > 0 ? filtered[0] : null;
   }
 
   deleteSnapshot(id: string): void {
