@@ -8,7 +8,7 @@
       import { Icon, ChevronRight, VideoCamera, Microphone, CodeBracketSquare, MagnifyingGlass,  SpeakerWave, Tv,Pencil, Eye, EyeSlash, Link, InformationCircle, Camera, ArrowUturnLeft } from "svelte-hero-icons";
     import { getSearchTokens, tokenSearch } from "../lib/functions";
     import OverlayMenuService from "../lib/OverlayMenu/OverlayMenuService";
-    import SnapshotService from "../lib/SnapshotService";
+    import SnapshotService, { type Snapshot } from "../lib/SnapshotService";
     
       interface CrosspointConnect {
         source:string,
@@ -42,7 +42,7 @@
     let sync:Subject<any> ;
 
     // Snapshot state variables
-    let snapshots: any[] = [];
+    let snapshots: Snapshot[] = [];
     let snapshotName: string = "";
     let showSnapshotDialog: boolean = false;
     let showRecallDialog: boolean = false;
