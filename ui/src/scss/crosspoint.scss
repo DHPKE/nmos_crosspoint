@@ -702,3 +702,92 @@ html[data-theme="light"] {
         }
     }
 }
+
+.presets-panel {
+    padding: 10px;
+    margin-top: 8px;
+
+    .presets-groupbox {
+        border: 1px solid theme('colors.base-300');
+        border-radius: 8px;
+        padding: 12px;
+        background-color: theme('colors.base-200');
+
+        .presets-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+
+            .presets-title {
+                font-weight: bold;
+                font-size: 14px;
+                opacity: 0.8;
+            }
+
+            .presets-actions {
+                display: flex;
+                gap: 6px;
+            }
+        }
+
+        .presets-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+
+            .preset-item {
+                display: flex;
+                align-items: center;
+                gap: 2px;
+
+                .preset-button {
+                    padding: 4px 12px;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 500;
+                    cursor: pointer;
+                    border: none;
+                    transition: opacity 0.15s, transform 0.1s;
+                    white-space: nowrap;
+
+                    &:hover {
+                        opacity: 0.85;
+                        transform: scale(1.02);
+                    }
+
+                    &:active {
+                        transform: scale(0.97);
+                    }
+                }
+
+                .preset-blue {
+                    background-color: #006dd2;
+                    color: white;
+                }
+
+                .preset-red {
+                    background-color: #c62828;
+                    color: white;
+                }
+
+                .preset-item-actions {
+                    display: flex;
+                    gap: 0;
+                    opacity: 0;
+                    transition: opacity 0.15s;
+                }
+
+                &:hover .preset-item-actions {
+                    opacity: 1;
+                }
+            }
+
+            .presets-empty {
+                font-size: 12px;
+                opacity: 0.5;
+                font-style: italic;
+            }
+        }
+    }
+}

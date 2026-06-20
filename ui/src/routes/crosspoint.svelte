@@ -770,6 +770,133 @@
     }
 
 
+    // Presets
+    interface PresetItem {
+      id: string;
+      name: string;
+      type: "relative" | "absolute";
+      connections: any[];
+      createdAt: string;
+      updatedAt: string;
+    }
+
+    let presets: PresetItem[] = [];
+    let presetNameInput: string = "";
+    let presetModal: any;
+    let presetSaveType: "relative" | "absolute" = "relative";
+
+    function loadPresets() {
+      ServerConnector.post("presets/list").then((response: any) => {
+        presets = response.data || [];
+      }).catch((e: any) => {
+        console.log("Error loading presets", e);
+      });
+    }
+
+    // Load presets once when crosspoint data arrives
+    let presetsLoaded = false;
+    $: if(sourceState.devices && !presetsLoaded) { presetsLoaded = true; loadPresets(); }
+
+    function openSavePresetModal(type: "relative" | "absolute") {
+      presetSaveType = type;
+      presetNameInput = "";
+      presetModal.showModal();
+    }
+
+    function savePreset() {
+      if (!presetNameInput.trim()) return;
+
+      let data: any = {
+        name: presetNameInput.trim(),
+        type: presetSaveType
+      };
+
+      // For relative presets, save current prepared connections if any,
+      // otherwise save current active connections that changed
+      if (presetSaveType === "relative") {
+        let connections: any[] = [];
+        // Gather all currently connected flows as the "relative" changes
+        for (let dev of (sourceState.devices || [])) {
+          for (let type of Object.keys(dev.receivers || {})) {
+            for (let flow of (dev.receivers[type] || [])) {
+              if (flow.connectedFlowId && flow.connectedFlowId !== "") {
+                connections.push({
+                  srcId: flow.connectedFlowId,
+                  dstId: flow.id
+                });
+              }
+            }
+          }
+        }
+        data.connections = connections;
+      }
+
+      ServerConnector.post("presets/save", data).then((response: any) => {
+        loadPresets();
+        presetModal.close();
+      }).catch((e: any) => {
+        ServerConnector.addFeedback({
+          message: "Error saving preset: " + e.message,
+          level: "error"
+        });
+      });
+    }
+
+    function recallPreset(preset: PresetItem) {
+      ServerConnector.post("presets/recall", { id: preset.id }).then((response: any) => {
+        showConnectResponse(response.data);
+      }).catch((e: any) => {
+        ServerConnector.addFeedback({
+          message: "Error recalling preset: " + (e.message || e),
+          level: "error"
+        });
+      });
+    }
+
+    function deletePreset(preset: PresetItem) {
+      ServerConnector.post("presets/delete", { id: preset.id }).then(() => {
+        loadPresets();
+      }).catch((e: any) => {
+        ServerConnector.addFeedback({
+          message: "Error deleting preset: " + (e.message || e),
+          level: "error"
+        });
+      });
+    }
+
+    function updatePreset(preset: PresetItem) {
+      let data: any = { id: preset.id };
+      if (preset.type === "relative") {
+        let connections: any[] = [];
+        for (let dev of (sourceState.devices || [])) {
+          for (let type of Object.keys(dev.receivers || {})) {
+            for (let flow of (dev.receivers[type] || [])) {
+              if (flow.connectedFlowId && flow.connectedFlowId !== "") {
+                connections.push({
+                  srcId: flow.connectedFlowId,
+                  dstId: flow.id
+                });
+              }
+            }
+          }
+        }
+        data.connections = connections;
+      }
+
+      ServerConnector.post("presets/update", data).then(() => {
+        loadPresets();
+        ServerConnector.addFeedback({
+          message: "Preset updated",
+          level: "success"
+        });
+      }).catch((e: any) => {
+        ServerConnector.addFeedback({
+          message: "Error updating preset: " + (e.message || e),
+          level: "error"
+        });
+      });
+    }
+
 
     
   </script>
@@ -948,6 +1075,40 @@
 
     </div>
 
+    <!-- Presets Panel -->
+    <div class="presets-panel">
+      <div class="presets-groupbox">
+        <div class="presets-header">
+          <span class="presets-title">Presets</span>
+          <div class="presets-actions">
+            <button class="btn btn-sm btn-info" on:click={() => openSavePresetModal("relative")}>+ Relative</button>
+            <button class="btn btn-sm btn-error" on:click={() => openSavePresetModal("absolute")}>+ Absolute</button>
+          </div>
+        </div>
+        <div class="presets-list">
+          {#each presets as preset}
+            <div class="preset-item preset-{preset.type}">
+              <button
+                class="preset-button {preset.type === 'relative' ? 'preset-blue' : 'preset-red'}"
+                on:click={() => recallPreset(preset)}
+                use:OverlayMenuService.tooltip
+                data-tooltip="{preset.type} preset: {preset.connections.length} connections"
+              >
+                {preset.name}
+              </button>
+              <div class="preset-item-actions">
+                <button class="btn btn-xs btn-ghost" on:click={() => updatePreset(preset)} use:OverlayMenuService.tooltip data-tooltip="Update preset with current state">⟳</button>
+                <button class="btn btn-xs btn-ghost text-error" on:click={() => deletePreset(preset)} use:OverlayMenuService.tooltip data-tooltip="Delete preset">✕</button>
+              </div>
+            </div>
+          {/each}
+          {#if presets.length === 0}
+            <div class="presets-empty">No presets saved</div>
+          {/if}
+        </div>
+      </div>
+    </div>
+
 
     <dialog bind:this={labelModal} class="modal">
       <div class="modal-box">
@@ -1016,6 +1177,37 @@
             <button class="btn bg-red-600 text-white" on:click={()=>{takeConnect()}} >Take</button>
             <button on:click={()=>{clearConnect()}} class="btn" >Clear All</button>
             <button class="btn">Close</button>
+          </form>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog bind:this={presetModal} class="modal">
+      <div class="modal-box">
+        <form method="dialog">
+          <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
+        </form>
+        <h3 class="font-bold text-lg">
+          Save {presetSaveType === 'relative' ? 'Relative' : 'Absolute'} Preset
+        </h3>
+        <p class="py-2 text-sm opacity-70">
+          {#if presetSaveType === 'relative'}
+            Relative presets save only current connections (changes only). On recall, only these connections are applied.
+          {:else}
+            Absolute presets save the full connection state. On recall, all receivers are set to the saved state (including disconnects).
+          {/if}
+        </p>
+        <input
+          bind:value={presetNameInput}
+          on:keypress={(e) => { if(e.keyCode == 13) savePreset() }}
+          type="text"
+          placeholder="Preset name"
+          class="input input-bordered w-full max-w-xs"
+        />
+        <div class="modal-action">
+          <form method="dialog">
+            <button on:click={() => savePreset()} class="btn {presetSaveType === 'relative' ? 'btn-info' : 'btn-error'}">Save</button>
+            <button class="btn">Cancel</button>
           </form>
         </div>
       </div>

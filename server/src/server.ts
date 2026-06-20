@@ -20,6 +20,7 @@ import { Topology } from "./lib/topology";
 import { MediaDevices } from "./lib/mediaDevices";
 import { SyncObject } from "./lib/SyncServer/syncObject";
 import { parseSettings } from "./lib/parseSettings";
+import { PresetManager } from "./lib/presets";
 
 
 
@@ -237,4 +238,78 @@ server?.addRoute("POST", "crosspoint","global", (client: WebsocketClient, query:
     });
 });
 
+
+// Presets
+const presetManager = new PresetManager("./config");
+
+server?.addRoute("POST", "presets/list","global", (client: WebsocketClient, query:string[]) => {
+    return new Promise((resolve, reject) => {
+        resolve({message:200, data:presetManager.getPresets()});
+    });
+});
+
+server?.addRoute("POST", "presets/save","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        try {
+            let preset = presetManager.savePreset(
+                postData.name,
+                postData.type,
+                crosspoint.crosspointState,
+                postData.connections
+            );
+            resolve({message:200, data:preset});
+        } catch(e:any) {
+            reject(e.message);
+        }
+    });
+});
+
+server?.addRoute("POST", "presets/update","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        let preset = presetManager.updatePreset(
+            postData.id,
+            crosspoint.crosspointState,
+            postData.connections
+        );
+        if(preset) {
+            resolve({message:200, data:preset});
+        } else {
+            reject("Preset not found");
+        }
+    });
+});
+
+server?.addRoute("POST", "presets/delete","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        if(presetManager.deletePreset(postData.id)) {
+            resolve({message:200, data:{success:true}});
+        } else {
+            reject("Preset not found");
+        }
+    });
+});
+
+server?.addRoute("POST", "presets/rename","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        let preset = presetManager.renamePreset(postData.id, postData.name);
+        if(preset) {
+            resolve({message:200, data:preset});
+        } else {
+            reject("Preset not found");
+        }
+    });
+});
+
+server?.addRoute("POST", "presets/recall","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        let connections = presetManager.recallPreset(postData.id, crosspoint.crosspointState);
+        if(connections) {
+            crosspoint.makeConnection({multiple:connections, preview:false})
+                .then((data) => resolve({message:200, data:data}))
+                .catch((m) => reject(m));
+        } else {
+            reject("Preset not found");
+        }
+    });
+});
 
