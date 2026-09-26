@@ -20,6 +20,7 @@ import { Topology } from "./lib/topology";
 import { MediaDevices } from "./lib/mediaDevices";
 import { SyncObject } from "./lib/SyncServer/syncObject";
 import { parseSettings } from "./lib/parseSettings";
+import { PresetManager } from "./lib/presets";
 
 
 
@@ -109,6 +110,7 @@ const mediaDevices = new MediaDevices(settings);
 
 const crosspoint = new CrosspointAbstraction(settings);
 const nmosConnector = new NmosRegistryConnector(settings);
+const presetManager = new PresetManager();
 
 
 
@@ -119,6 +121,8 @@ server.addSyncObject("nmos","global",nmosConnector.syncNmos);
 server.addSyncObject("nmosConnectionState","global",nmosConnector.syncConnectionState);
 
 server.addSyncObject("crosspoint","global",crosspoint.syncCrosspoint);
+
+server.addSyncObject("presets","global",presetManager.syncPresets);
 
 
 let topology = null;
@@ -221,6 +225,67 @@ server.addRoute("POST", "crosspoint","global", (client: WebsocketClient, query:s
             .crosspointApi(postData)
             .then((m) => resolve(m))
             .catch((m) => reject(m));
+    });
+});
+
+
+// Presets / Snapshots
+//
+// postData for presetSave:
+//   { name: string, type: "absolute" | "relative", receiverIds?: string[], id?: string (to overwrite) }
+// "absolute" captures every receiver's current source (including disconnected ones).
+// "relative" captures only the receivers listed in receiverIds - recalling it leaves
+// every other destination untouched.
+server.addRoute("POST", "presetSave","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        try{
+            let type: "absolute" | "relative" = postData.type === "relative" ? "relative" : "absolute";
+            let preset = presetManager.save(postData.name, type, crosspoint.crosspointState, postData.receiverIds, postData.id);
+            resolve({message:200, data:preset});
+        }catch(e){
+            SyncLog.log("error", "Presets", "presetSave failed: " + e.message, e);
+            reject(e.message);
+        }
+    });
+});
+
+// postData for presetRecall: { id: string }
+// Applies whatever part of the preset still resolves against the live crosspoint state,
+// and always reports back which parts (if any) could not be applied instead of failing
+// silently or partially applying with no indication to the operator.
+server.addRoute("POST", "presetRecall","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        let resolved = presetManager.resolve(postData.id, crosspoint.crosspointState);
+        if(resolved.presetName == null){
+            reject(resolved.warnings.join(" "));
+            return;
+        }
+        if(resolved.multiple.length === 0){
+            reject("Preset \""+resolved.presetName+"\" has no connections that still resolve against the current crosspoint state.");
+            return;
+        }
+        crosspoint
+            .makeConnection({multiple: resolved.multiple, preview:false})
+            .then((data) => resolve({message:200, data:data, warnings:resolved.warnings}))
+            .catch((m) => reject(m));
+    });
+});
+
+server.addRoute("POST", "presetRename","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        try{
+            presetManager.rename(postData.id, postData.name);
+            resolve({message:200});
+        }catch(e){
+            reject(e.message);
+        }
+    });
+});
+
+server.addRoute("POST", "presetDelete","global", (client: WebsocketClient, query:string[], postData: any) => {
+    return new Promise((resolve, reject) => {
+        presetManager.delete(postData.id);
+        resolve({message:200});
     });
 });
 

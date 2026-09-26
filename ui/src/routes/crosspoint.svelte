@@ -8,7 +8,21 @@
       import { Icon, ChevronRight, VideoCamera, Microphone, CodeBracketSquare, MagnifyingGlass,  SpeakerWave, Tv,Pencil, Eye, EyeSlash, Link, InformationCircle, Camera, ArrowUturnLeft } from "svelte-hero-icons";
     import { getSearchTokens, tokenSearch } from "../lib/functions";
     import OverlayMenuService from "../lib/OverlayMenu/OverlayMenuService";
-    import SnapshotService, { type Snapshot } from "../lib/SnapshotService";
+
+    interface PresetConnection {
+      destinationId: string;
+      destinationLabel: string;
+      sourceId: string;
+      sourceLabel: string;
+    }
+    interface Preset {
+      id: string;
+      name: string;
+      type: "absolute" | "relative";
+      connections: PresetConnection[];
+      createdAt: number;
+      updatedAt: number;
+    }
     
       interface CrosspointConnect {
         source:string,
@@ -41,11 +55,12 @@
   
     let sync:Subject<any> ;
 
-    // Snapshot state variables
-    let snapshots: Snapshot[] = [];
+    // Preset state - list is kept live via the "presets" server sync object (see onMount),
+    // so it updates immediately across every open browser tab/client, not just this one.
+    let presets: Preset[] = [];
+    let presetSync:Subject<any>;
     let snapshotName: string = "";
-    let showSnapshotDialog: boolean = false;
-    let showRecallDialog: boolean = false;
+    let presetType: "absolute" | "relative" = "absolute";
     let saveSnapshotModal: any;
     let recallSnapshotModal: any;
 
@@ -106,15 +121,37 @@
         }
       }catch(e){}
 
-      // Load snapshots
-      loadSnapshots();
+      // Presets are pushed live from the server (same JSON-patch sync mechanism as the
+      // crosspoint state itself), so this stays current across saves/deletes/renames from
+      // any client without an explicit reload call.
+      presetSync = ServerConnector.sync("presets");
+      presetSync.subscribe((list:any)=>{
+        presets = Array.isArray(list) ? list : [];
+      });
 
       sync = ServerConnector.sync("crosspoint");
       sync.subscribe((obj:any)=>{
         sourceState = obj;
-        doFilter();
+        scheduleDoFilter();
       });
     });
+
+    // Bursts of incoming patches (a big multi-connection Take, a registry resync touching
+    // many devices) previously each triggered their own full doFilter() pass - including a
+    // structuredClone() of every device - even when several patches land in the same frame.
+    // Coalescing to one recompute per animation frame keeps updates just as responsive to the
+    // eye while collapsing N redundant passes into 1 during a burst.
+    let doFilterScheduled = false;
+    function scheduleDoFilter(){
+      if(doFilterScheduled){
+        return;
+      }
+      doFilterScheduled = true;
+      requestAnimationFrame(()=>{
+        doFilterScheduled = false;
+        doFilter();
+      });
+    }
 
     function changeFilter(){
       setTimeout(()=>{
@@ -132,25 +169,28 @@
 
       if(sourceState.devices){
         sourceState.devices.forEach((dev:any)=>{
-          let count = 0;
+          let senderCount = 0;
+          let receiverCount = 0;
           flowTypes.forEach((type)=>{
-            count+= dev.senders[type].length;
+            senderCount += dev.senders[type].length;
+            receiverCount += dev.receivers[type].length;
           })
-          if(count > 0){
-            let d = structuredClone(dev);
-            d.receivers = undefined
+          if(senderCount == 0 && receiverCount == 0){
+            return;
+          }
+          // One structuredClone() per device instead of two (previously cloned once while
+          // building `senders` and again, separately, while building `receivers`, for every
+          // device on every recompute). The senders-list and receivers-list entries end up
+          // exposing disjoint branches (receivers:undefined vs senders:undefined respectively)
+          // of the same clone, so they stay fully independent of each other and of the live
+          // sourceState - just built from one deep copy instead of two.
+          let clone = structuredClone(dev);
+          if(senderCount > 0){
+            let d:any = {...clone, receivers: undefined};
             senders.push(d);
           }
-        })
-
-        sourceState.devices.forEach((dev:any)=>{
-          let count = 0;
-          flowTypes.forEach((type)=>{
-            count+= dev.receivers[type].length;
-          })
-          if(count > 0){
-            let d = structuredClone(dev)
-            d.senders = undefined
+          if(receiverCount > 0){
+            let d:any = {...clone, senders: undefined};
             receivers.push(d);
           }
         })
@@ -289,6 +329,18 @@
             return false;
           }); 
         }
+
+        // Precompute O(1) membership sets once per device, per doFilter() run, instead of
+        // scanning senderIds/receiverIds/connectedFlows arrays inside getConnectClass() for
+        // every single grid cell. With N devices this is O(N) here vs. the previous
+        // O(rows x cols x list length) cost paid on every render.
+        receivers.forEach((dev:any)=>{
+          dev.receiverIdSet = new Set(dev.receiverIds);
+          dev.connectedFlowSet = new Set(dev.connectedFlows);
+        });
+        senders.forEach((dev:any)=>{
+          dev.senderIdSet = new Set(dev.senderIds);
+        });
     }
       
     }
@@ -352,6 +404,10 @@
     onDestroy(() => {
       sync.unsubscribe();
           ServerConnector.unsync("crosspoint")
+      if(presetSync){
+        presetSync.unsubscribe();
+        ServerConnector.unsync("presets");
+      }
       });
 
  
@@ -363,6 +419,21 @@
       }
       return false;
     }
+
+    // Derived once whenever preparedConnectList / workingConnectList actually change (Svelte
+    // reactivity), not once per grid cell. getConnectClass() below does O(1) lookups against
+    // these instead of scanning + nested-looping the source lists for every cell in the matrix.
+    function buildPairSet(list:any[]){
+      let s = new Set<string>();
+      for(let c of list){
+        if(c.src && c.dst){
+          s.add(c.src.id+"|"+c.dst.id);
+        }
+      }
+      return s;
+    }
+    $: preparedPairSet = buildPairSet(preparedConnectList);
+    $: workingPairSet = buildPairSet(workingConnectList);
 
 
     function connect (srcDev:any,src:any,dstDev:any, dst:any, force = false) {
@@ -606,53 +677,30 @@
     }
 
     function getConnectClass(srcDev:any,src:any,dstDev:any, dst:any){
-      for(let c of preparedConnectList){
-        if(c.src && c.dst){
-
-
-          if(src && dst){
-              if( src.id == c.src.id && dst.id == c.dst.id ){
-                return "prepared"
-              }
-          }
-
-
-          if(!src && !dst){
-            for(let r of dstDev.receiverIds){
-              for(let s of srcDev.senderIds){
-                if(r == c.dst.id && s == c.src.id){
-                  return "prepared"
-                }
-              }
-            }
-          }
-
-           
+      if(src && dst){
+        let key = src.id+"|"+dst.id;
+        if(preparedPairSet.has(key)){
+          return "prepared";
         }
-      }
-
-      for(let c of workingConnectList){
-        if(c.src && c.dst){
-
-
-          if(src && dst){
-              if( src.id == c.src.id && dst.id == c.dst.id ){
-                return "working"
-              }
+        if(workingPairSet.has(key)){
+          return "working";
+        }
+      }else{
+        // Device-header cell (collapsed row/column): is there any individual prepared/working
+        // connection whose destination belongs to dstDev and whose source belongs to srcDev.
+        // preparedConnectList/workingConnectList are the small "currently staged" lists, so
+        // this stays O(list length) - the expensive part (id membership) is now O(1) via the
+        // precomputed Sets attached in doFilter(), instead of the previous nested loop over
+        // every receiverId x senderId combination of both devices.
+        for(let c of preparedConnectList){
+          if(c.src && c.dst && dstDev.receiverIdSet.has(c.dst.id) && srcDev.senderIdSet.has(c.src.id)){
+            return "prepared";
           }
-
-
-          if(!src && !dst){
-            for(let r of dstDev.receiverIds){
-              for(let s of srcDev.senderIds){
-                if(r == c.dst.id && s == c.src.id){
-                  return "working"
-                }
-              }
-            }
+        }
+        for(let c of workingConnectList){
+          if(c.src && c.dst && dstDev.receiverIdSet.has(c.dst.id) && srcDev.senderIdSet.has(c.src.id)){
+            return "working";
           }
-
-           
         }
       }
 
@@ -671,7 +719,7 @@
       }else{
         for(let type in srcDev.senders){
           for(let flow of srcDev.senders[type]){
-            if(dstDev.connectedFlows.includes(flow.id)){
+            if(dstDev.connectedFlowSet.has(flow.id)){
               return "active"
             }
           }
@@ -784,114 +832,94 @@
         labelModal.close()
       }
 
-      // Snapshot functions
-      function loadSnapshots() {
-        snapshots = SnapshotService.getAllSnapshots();
-      }
-
+      // Preset functions - all state lives on the server (./state/presets.json), so presets
+      // survive a page reload, are shared across every operator's browser, and recall is
+      // resolved server-side against live device ids rather than replayed as a sequence of
+      // separate client requests.
       function openSaveSnapshotDialog() {
-        if (preparedConnectList.length === 0) {
+        if (presetType === "relative" && preparedConnectList.length === 0) {
           ServerConnector.addFeedback({
-            message: "No connections to save. Prepare connections first.",
+            message: "No connections staged. Prepare connections first, or switch to Absolute to save the full current routing state.",
             level: "warning"
           });
           return;
         }
         const now = new Date();
-        snapshotName = `Snapshot ${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
+        snapshotName = `Preset ${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
         saveSnapshotModal.showModal();
       }
 
       function saveCurrentSnapshot() {
         if (snapshotName.trim() === "") {
           ServerConnector.addFeedback({
-            message: "Please enter a snapshot name",
+            message: "Please enter a preset name",
             level: "warning"
           });
           return;
         }
-        SnapshotService.saveSnapshot(snapshotName, preparedConnectList);
-        loadSnapshots();
-        saveSnapshotModal.close();
-        ServerConnector.addFeedback({
-          message: `Snapshot "${snapshotName}" saved successfully`,
-          level: "success"
+
+        let payload:any = { name: snapshotName, type: presetType };
+        if (presetType === "relative") {
+          payload.receiverIds = preparedConnectList
+            .filter((c:any) => c.dst)
+            .map((c:any) => c.dst.id);
+          if (payload.receiverIds.length === 0) {
+            ServerConnector.addFeedback({
+              message: "No staged connections have a resolved destination to save.",
+              level: "warning"
+            });
+            return;
+          }
+        }
+
+        ServerConnector.post("presetSave", payload).then(() => {
+          saveSnapshotModal.close();
+          ServerConnector.addFeedback({
+            message: `Preset "${snapshotName}" saved (${presetType}).`,
+            level: "success"
+          });
+          snapshotName = "";
+        }).catch((e:any) => {
+          ServerConnector.addFeedback({
+            message: "Can not save preset: " + (e && e.message ? e.message : e),
+            level: "error"
+          });
         });
       }
 
       function openRecallDialog() {
-        loadSnapshots();
         recallSnapshotModal.showModal();
       }
 
-      function recallSnapshot(snapshotId: string) {
-        const snapshot = SnapshotService.getSnapshot(snapshotId);
-        if (!snapshot) {
-          ServerConnector.addFeedback({
-            message: "Snapshot not found",
-            level: "error"
-          });
-          return;
-        }
-
-        // Clear current prepared connections
-        preparedConnectList = [];
-
-        // Recall each connection from the snapshot
-        let recallPromises: Promise<any>[] = [];
-        snapshot.connections.forEach((conn) => {
-          let srcString = getDevcieNameString(conn.srcDev, conn.src);
-          let dstString = getDevcieNameString(conn.dstDev, conn.dst);
-          
-          let promise = ServerConnector.post("makeconnection", {
-            prepare: true,
-            source: srcString,
-            destination: dstString
-          }).then((response) => {
-            let newList: any[] = [];
-            response.data.connections.forEach((c: any) => {
-              newList.push({
-                srcDev: c.srcDev,
-                src: c.src,
-                dstDev: c.dstDev,
-                dst: c.dst
-              });
-            });
-            return newList;
-          }).catch((e) => {
+      function recallSnapshot(presetId: string) {
+        ServerConnector.post("presetRecall", { id: presetId }).then((response:any) => {
+          if (response.warnings && response.warnings.length > 0) {
             ServerConnector.addFeedback({
-              message: "Error recalling connection: " + e.message,
-              level: "error"
+              message: "Preset recalled with warnings: " + response.warnings.join(" "),
+              level: "warning"
             });
-            return [];
-          });
-          recallPromises.push(promise);
-        });
-
-        Promise.all(recallPromises).then((results) => {
-          results.forEach((newList) => {
-            cleanPreparedConnections(newList);
-          });
-          receivers = [...receivers];
-          updateGlobalTake();
+          } else {
+            ServerConnector.addFeedback({
+              message: "Preset recalled.",
+              level: "success"
+            });
+          }
           recallSnapshotModal.close();
+        }).catch((e:any) => {
           ServerConnector.addFeedback({
-            message: `Snapshot "${snapshot.name}" recalled successfully`,
-            level: "success"
+            message: "Can not recall preset: " + (e && e.message ? e.message : e),
+            level: "error"
           });
         });
       }
 
-      function deleteSnapshot(snapshotId: string) {
-        const snapshot = SnapshotService.getSnapshot(snapshotId);
-        if (!snapshot) return;
-        
-        if (confirm(`Delete snapshot "${snapshot.name}"?`)) {
-          SnapshotService.deleteSnapshot(snapshotId);
-          loadSnapshots();
-          ServerConnector.addFeedback({
-            message: `Snapshot "${snapshot.name}" deleted`,
-            level: "info"
+      function deleteSnapshot(presetId: string, presetName: string) {
+        if (confirm(`Delete preset "${presetName}"?`)) {
+          ServerConnector.post("presetDelete", { id: presetId }).catch((e:any) => {
+            ServerConnector.addFeedback({
+              message: "Can not delete preset: " + (e && e.message ? e.message : e),
+              level: "error"
+            });
           });
         }
       }
@@ -1079,15 +1107,15 @@
 
     </div>
 
-    <!-- Snapshot Controls Bottom Bar -->
+    <!-- Preset Controls Bottom Bar -->
     <div class="snapshot-controls" style="position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; background-color: hsl(var(--b2)); padding: 1rem; display: flex; justify-content: center; gap: 1rem; box-shadow: 0 -2px 10px rgba(0,0,0,0.1);">
       <button on:click={openSaveSnapshotDialog} class="btn btn-primary gap-2">
         <Icon src={Camera} size="20"></Icon>
-        <span>Save Snapshot</span>
+        <span>Save Preset</span>
       </button>
       <button on:click={openRecallDialog} class="btn btn-primary gap-2">
         <Icon src={ArrowUturnLeft} size="20"></Icon>
-        <span>Recall Snapshot</span>
+        <span>Recall Preset</span>
       </button>
     </div>
 
@@ -1163,22 +1191,39 @@
       </div>
     </dialog>
 
-    <!-- Save Snapshot Dialog -->
+    <!-- Save Preset Dialog -->
     <dialog bind:this={saveSnapshotModal} class="modal">
       <div class="modal-box">
         <form method="dialog">
           <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
         </form>
-        <h3 class="font-bold text-lg">Save Snapshot</h3>
-        <p class="py-2">Connections to save: {preparedConnectList.length}</p>
+        <h3 class="font-bold text-lg">Save Preset</h3>
+
+        <div class="form-control py-2">
+          <label class="label cursor-pointer justify-start gap-2">
+            <input type="radio" name="presetType" class="radio radio-primary" value="absolute" bind:group={presetType} />
+            <span class="label-text">Absolute - the full current state of every receiver</span>
+          </label>
+          <label class="label cursor-pointer justify-start gap-2">
+            <input type="radio" name="presetType" class="radio radio-primary" value="relative" bind:group={presetType} />
+            <span class="label-text">Relative - only the receivers currently staged below (prepared, not yet taken)</span>
+          </label>
+        </div>
+
+        {#if presetType === "relative"}
+          <p class="py-2">Staged connections to include: {preparedConnectList.length}</p>
+        {:else}
+          <p class="py-2">Every receiver's current source will be captured, including disconnected ones.</p>
+        {/if}
+
         <div class="form-control">
           <label class="label">
-            <span class="label-text">Snapshot Name</span>
+            <span class="label-text">Preset Name</span>
           </label>
           <input 
             bind:value={snapshotName} 
             type="text" 
-            placeholder="Enter snapshot name" 
+            placeholder="Enter preset name" 
             class="input input-bordered w-full" 
             on:keypress={(e)=>{if(e.keyCode == 13) saveCurrentSnapshot()}}
           />
@@ -1192,36 +1237,38 @@
       </div>
     </dialog>
 
-    <!-- Recall Snapshot Dialog -->
+    <!-- Recall Preset Dialog -->
     <dialog bind:this={recallSnapshotModal} class="modal">
       <div class="modal-box" style="max-width:80%;">
         <form method="dialog">
           <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
         </form>
-        <h3 class="font-bold text-lg">Recall Snapshot</h3>
+        <h3 class="font-bold text-lg">Recall Preset</h3>
         
-        {#if snapshots.length === 0}
-          <p class="py-4">No snapshots saved yet.</p>
+        {#if presets.length === 0}
+          <p class="py-4">No presets saved yet.</p>
         {:else}
           <div class="overflow-x-auto">
             <table class="table">
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Updated</th>
                   <th>Connections</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {#each snapshots as snapshot}
+                {#each presets as preset}
                   <tr>
-                    <td>{snapshot.name}</td>
-                    <td>{new Date(snapshot.timestamp).toLocaleString()}</td>
-                    <td>{snapshot.connections.length}</td>
+                    <td>{preset.name}</td>
+                    <td><span class="badge {(preset.type === 'absolute' ? 'badge-primary' : 'badge-secondary')}">{preset.type}</span></td>
+                    <td>{new Date(preset.updatedAt).toLocaleString()}</td>
+                    <td>{preset.connections.length}</td>
                     <td>
-                      <button on:click={() => recallSnapshot(snapshot.id)} class="btn btn-sm btn-primary">Recall</button>
-                      <button on:click={() => deleteSnapshot(snapshot.id)} class="btn btn-sm btn-error">Delete</button>
+                      <button on:click={() => recallSnapshot(preset.id)} class="btn btn-sm btn-primary">Recall</button>
+                      <button on:click={() => deleteSnapshot(preset.id, preset.name)} class="btn btn-sm btn-error">Delete</button>
                     </td>
                   </tr>
                 {/each}
